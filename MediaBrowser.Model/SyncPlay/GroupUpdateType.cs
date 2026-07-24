@@ -48,6 +48,12 @@ namespace MediaBrowser.Model.SyncPlay
         /// <summary>
         /// The library-access-denied error. Sent when a user tries to join a group without required access to the library.
         /// </summary>
-        LibraryAccessDenied
+        LibraryAccessDenied,
+
+        /// <summary>
+        /// The group-diagnostics update. Gusfin extension: periodic per-member playback diagnostics,
+        /// only sent to members that have reported diagnostics themselves.
+        /// </summary>
+        GroupDiagnostics
     }
 }

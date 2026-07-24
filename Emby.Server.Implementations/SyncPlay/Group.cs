@@ -11,6 +11,7 @@ using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Session;
 using MediaBrowser.Controller.SyncPlay;
 using MediaBrowser.Controller.SyncPlay.GroupStates;
+using MediaBrowser.Controller.SyncPlay.PlaybackRequests;
 using MediaBrowser.Controller.SyncPlay.Queue;
 using MediaBrowser.Controller.SyncPlay.Requests;
 using MediaBrowser.Model.SyncPlay;
@@ -61,6 +62,16 @@ namespace Emby.Server.Implementations.SyncPlay
         /// The internal group state.
         /// </summary>
         private IGroupState _state;
+
+        /// <summary>
+        /// The minimum interval between diagnostics broadcasts, in milliseconds. Gusfin extension.
+        /// </summary>
+        private const long DiagnosticsBroadcastIntervalMs = 1000;
+
+        /// <summary>
+        /// The time of the last diagnostics broadcast. Gusfin extension.
+        /// </summary>
+        private DateTime _lastDiagnosticsBroadcast = DateTime.MinValue;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="Group" /> class.
@@ -452,6 +463,75 @@ namespace Emby.Server.Implementations.SyncPlay
             }
 
             return max;
+        }
+
+        /// <inheritdoc />
+        public void UpdateDiagnostics(SessionInfo session, DiagnosticsGroupRequest request)
+        {
+            if (_participants.TryGetValue(session.Id, out GroupMember value))
+            {
+                value.SupportsDiagnostics = true;
+                value.LastPositionTicks = SanitizePositionTicks(request.PositionTicks);
+                value.LastPlaybackDiffMillis = request.PlaybackDiffMillis;
+                value.LastIsPlaying = request.IsPlaying;
+                value.LastDiagnosticsReportAt = DateTime.UtcNow;
+            }
+        }
+
+        /// <inheritdoc />
+        public Task BroadcastDiagnosticsIfDue(SessionInfo from, CancellationToken cancellationToken)
+        {
+            var now = DateTime.UtcNow;
+            if ((now - _lastDiagnosticsBroadcast).TotalMilliseconds < DiagnosticsBroadcastIntervalMs)
+            {
+                return Task.CompletedTask;
+            }
+
+            _lastDiagnosticsBroadcast = now;
+
+            var isPlaying = _state.Type.Equals(GroupStateType.Playing);
+            var groupPositionTicks = PositionTicks;
+            if (isPlaying)
+            {
+                var elapsedTime = now - LastActivity;
+                // Elapsed time is negative while playback start is delayed to account for latency,
+                // in which case LastActivity is in the future. See GetPlayQueueUpdate.
+                groupPositionTicks += Math.Max(elapsedTime.Ticks, 0);
+            }
+
+            var members = new List<MemberDiagnosticsInfo>(_participants.Count);
+            foreach (var member in _participants.Values)
+            {
+                members.Add(new MemberDiagnosticsInfo(
+                    member.UserId,
+                    member.UserName,
+                    member.Ping,
+                    member.IsBuffering,
+                    member.SupportsDiagnostics,
+                    member.SupportsDiagnostics ? member.LastPositionTicks : (long?)null,
+                    member.SupportsDiagnostics ? member.LastPlaybackDiffMillis : (double?)null,
+                    member.LastIsPlaying,
+                    member.SupportsDiagnostics ? member.LastDiagnosticsReportAt : (DateTime?)null));
+            }
+
+            var update = new SyncPlayGroupDiagnosticsUpdate(
+                GroupId,
+                new GroupDiagnosticsUpdate(SanitizePositionTicks(groupPositionTicks), now, isPlaying, members));
+
+            // Only diagnostics-capable members receive this update type,
+            // so that clients unaware of the extension never see it.
+            IEnumerable<Task> GetTasks()
+            {
+                foreach (var member in _participants.Values)
+                {
+                    if (member.SupportsDiagnostics)
+                    {
+                        yield return _sessionManager.SendSyncPlayGroupUpdate(member.SessionId, update, cancellationToken);
+                    }
+                }
+            }
+
+            return Task.WhenAll(GetTasks());
         }
 
         /// <inheritdoc />

@@ -210,6 +210,15 @@ namespace MediaBrowser.Controller.SyncPlay.GroupStates
             context.SetIgnoreGroupWait(session, request.IgnoreWait);
         }
 
+        /// <inheritdoc />
+        public virtual void HandleRequest(DiagnosticsGroupRequest request, IGroupStateContext context, GroupStateType prevState, SessionInfo session, CancellationToken cancellationToken)
+        {
+            // Gusfin extension: store the report and rebroadcast a group snapshot to
+            // diagnostics-capable members, throttled by the context.
+            context.UpdateDiagnostics(session, request);
+            context.BroadcastDiagnosticsIfDue(session, cancellationToken);
+        }
+
         /// <summary>
         /// Sends a group state update to all group.
         /// </summary>

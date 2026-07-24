@@ -215,5 +215,15 @@ namespace MediaBrowser.Controller.SyncPlay
         /// <param name="session">The session.</param>
         /// <param name="cancellationToken">The cancellation token.</param>
         void HandleRequest(IgnoreWaitGroupRequest request, IGroupStateContext context, GroupStateType prevState, SessionInfo session, CancellationToken cancellationToken);
+
+        /// <summary>
+        /// Handles a diagnostics report from a session. Context's state should not change. Gusfin extension.
+        /// </summary>
+        /// <param name="request">The diagnostics request.</param>
+        /// <param name="context">The context of the state.</param>
+        /// <param name="prevState">The previous state.</param>
+        /// <param name="session">The session.</param>
+        /// <param name="cancellationToken">The cancellation token.</param>
+        void HandleRequest(DiagnosticsGroupRequest request, IGroupStateContext context, GroupStateType prevState, SessionInfo session, CancellationToken cancellationToken);
     }
 }
