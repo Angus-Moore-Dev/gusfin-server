@@ -265,6 +265,12 @@ namespace MediaBrowser.Controller.SyncPlay.GroupStates
             // Wait for sessions to be ready, then switch to paused state.
             ResumePlaying = false;
 
+            // Gusfin fix: broadcast the pause immediately. Sessions that have not completed
+            // the group wait yet (e.g. still applying a seek) are otherwise never told to
+            // pause and keep playing while the rest of the group is paused.
+            var command = context.NewSyncPlayCommand(SendCommandType.Pause);
+            context.SendCommand(session, SyncPlayBroadcastType.AllGroup, command, cancellationToken);
+
             // Notify relevant state change event.
             SendGroupStateUpdate(context, request, session, cancellationToken);
         }
