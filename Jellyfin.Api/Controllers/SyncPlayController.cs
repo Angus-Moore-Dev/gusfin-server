@@ -422,6 +422,28 @@ public class SyncPlayController : BaseJellyfinApiController
     }
 
     /// <summary>
+    /// Report playback diagnostics to the SyncPlay group. Gusfin extension.
+    /// </summary>
+    /// <param name="requestData">The player diagnostics.</param>
+    /// <response code="204">Diagnostics update sent to diagnostics-capable group members.</response>
+    /// <returns>A <see cref="NoContentResult"/> indicating success.</returns>
+    [HttpPost("Diagnostics")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [Authorize(Policy = Policies.SyncPlayIsInGroup)]
+    public async Task<ActionResult> SyncPlayDiagnostics(
+        [FromBody, Required] DiagnosticsRequestDto requestData)
+    {
+        var currentSession = await RequestHelpers.GetSession(_sessionManager, _userManager, HttpContext).ConfigureAwait(false);
+        var syncPlayRequest = new DiagnosticsGroupRequest(
+            requestData.When,
+            requestData.PositionTicks,
+            requestData.PlaybackDiffMillis,
+            requestData.IsPlaying);
+        _syncPlayManager.HandleRequest(currentSession, syncPlayRequest, CancellationToken.None);
+        return NoContent();
+    }
+
+    /// <summary>
     /// Update session ping.
     /// </summary>
     /// <param name="requestData">The new ping.</param>

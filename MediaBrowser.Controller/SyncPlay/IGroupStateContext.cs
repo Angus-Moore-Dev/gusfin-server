@@ -138,6 +138,21 @@ namespace MediaBrowser.Controller.SyncPlay
         void SetIgnoreGroupWait(SessionInfo session, bool ignoreGroupWait);
 
         /// <summary>
+        /// Updates the playback diagnostics of a session. Gusfin extension.
+        /// </summary>
+        /// <param name="session">The session.</param>
+        /// <param name="request">The diagnostics report.</param>
+        void UpdateDiagnostics(SessionInfo session, PlaybackRequests.DiagnosticsGroupRequest request);
+
+        /// <summary>
+        /// Sends a diagnostics snapshot to diagnostics-capable members, unless one was sent recently. Gusfin extension.
+        /// </summary>
+        /// <param name="from">The current session.</param>
+        /// <param name="cancellationToken">The cancellation token.</param>
+        /// <returns>The task.</returns>
+        Task BroadcastDiagnosticsIfDue(SessionInfo from, CancellationToken cancellationToken);
+
+        /// <summary>
         /// Sets a new play queue.
         /// </summary>
         /// <param name="playQueue">The new play queue.</param>
