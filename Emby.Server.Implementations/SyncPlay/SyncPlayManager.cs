@@ -3,11 +3,15 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
+using Jellyfin.Database.Implementations.Enums;
+using Jellyfin.Extensions;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Session;
 using MediaBrowser.Controller.SyncPlay;
 using MediaBrowser.Controller.SyncPlay.Requests;
+using MediaBrowser.Model.Session;
 using MediaBrowser.Model.SyncPlay;
 using Microsoft.Extensions.Logging;
 
@@ -168,6 +172,28 @@ namespace Emby.Server.Implementations.SyncPlay
                 // Group lock required to let other requests end first.
                 lock (group)
                 {
+                    // Gusfin extension: private groups require an invite. Checked before the
+                    // library-access guard because that error carries the real group id, and
+                    // must deny existence so private groups cannot be enumerated by probing ids.
+                    if (!group.CanJoin(session.UserId))
+                    {
+                        _logger.LogWarning("Session {SessionId} tried to join private group {GroupId} without a valid invite.", session.Id, group.GroupId.ToString());
+
+                        if (group.HasLapsedInvite(session.UserId))
+                        {
+                            // The user demonstrably knew about the group; report the lapse honestly.
+                            var lapsed = new SyncPlayGroupInviteRequiredUpdate(group.GroupId, group.GroupName);
+                            _sessionManager.SendSyncPlayGroupUpdate(session.Id, lapsed, CancellationToken.None);
+                        }
+                        else
+                        {
+                            var error = new SyncPlayGroupDoesNotExistUpdate(Guid.Empty, string.Empty);
+                            _sessionManager.SendSyncPlayGroupUpdate(session.Id, error, CancellationToken.None);
+                        }
+
+                        return;
+                    }
+
                     if (!group.HasAccessToPlayQueue(user))
                     {
                         _logger.LogWarning("Session {SessionId} tried to join group {GroupId} but does not have access to some content of the playing queue.", session.Id, group.GroupId.ToString());
@@ -198,6 +224,9 @@ namespace Emby.Server.Implementations.SyncPlay
 
                     UpdateSessionsCounter(session.UserId, 1);
                     group.SessionJoin(session, request, cancellationToken);
+
+                    // Gusfin extension: close any duplicate invite modal on the user's other devices.
+                    NotifyInviteCancelled(new List<Guid> { session.UserId }, group.GroupId, GroupInviteCancelReason.AcceptedElsewhere, cancellationToken);
                 }
             }
         }
@@ -241,7 +270,14 @@ namespace Emby.Server.Implementations.SyncPlay
                         if (group.IsGroupEmpty())
                         {
                             _logger.LogInformation("Group {GroupId} is empty, removing it.", group.GroupId);
+
+                            // Gusfin extension: dismiss the invite modal of anyone still deciding.
+                            var orphanedInvitees = group.GetPendingInviteeIds();
                             _groups.Remove(group.GroupId, out _);
+                            if (orphanedInvitees.Count > 0)
+                            {
+                                NotifyInviteCancelled(orphanedInvitees, group.GroupId, GroupInviteCancelReason.GroupClosed, CancellationToken.None);
+                            }
                         }
                     }
                 }
@@ -278,7 +314,7 @@ namespace Emby.Server.Implementations.SyncPlay
                     // Locking required as group is not thread-safe.
                     lock (group)
                     {
-                        if (group.HasAccessToPlayQueue(user))
+                        if (group.HasAccessToPlayQueue(user) && group.IsVisibleTo(session.UserId))
                         {
                             list.Add(group.GetInfo());
                         }
@@ -303,7 +339,7 @@ namespace Emby.Server.Implementations.SyncPlay
                     // Locking required as group is not thread-safe.
                     lock (group)
                     {
-                        if (group.GroupId.Equals(groupId) && group.HasAccessToPlayQueue(user))
+                        if (group.GroupId.Equals(groupId) && group.HasAccessToPlayQueue(user) && group.IsVisibleTo(session.UserId))
                         {
                             return group.GetInfo();
                         }
@@ -367,6 +403,220 @@ namespace Emby.Server.Implementations.SyncPlay
             }
 
             return false;
+        }
+
+        // Gusfin extension: private groups & invites.
+
+        /// <inheritdoc />
+        public void InviteToGroup(SessionInfo session, IReadOnlyList<Guid> userIds, CancellationToken cancellationToken)
+        {
+            if (session is null)
+            {
+                throw new InvalidOperationException("Session is null!");
+            }
+
+            if (userIds is null)
+            {
+                throw new InvalidOperationException("User ids are null!");
+            }
+
+            // The group is resolved from the caller's own session, never from a client-supplied
+            // group id: this is the actual per-group authorization, since the SyncPlayIsInGroup
+            // policy only checks that the user is active in some group.
+            if (!_sessionToGroupMap.TryGetValue(session.Id, out var group))
+            {
+                _logger.LogWarning("Session {SessionId} does not belong to any group.", session.Id);
+
+                var error = new SyncPlayNotInGroupUpdate(Guid.Empty, string.Empty);
+                _sessionManager.SendSyncPlayGroupUpdate(session.Id, error, CancellationToken.None);
+                return;
+            }
+
+            // Group lock required as Group is not thread-safe.
+            lock (group)
+            {
+                // Drop request if group is being torn down.
+                if (group.IsGroupEmpty())
+                {
+                    return;
+                }
+
+                var invited = new HashSet<Guid>();
+                foreach (var userId in userIds)
+                {
+                    if (userId.IsEmpty() || userId.Equals(session.UserId) || !invited.Add(userId))
+                    {
+                        continue;
+                    }
+
+                    var user = _userManager.GetUserById(userId);
+                    if (user is null || user.SyncPlayAccess == SyncPlayUserAccessType.None)
+                    {
+                        continue;
+                    }
+
+                    // Never invite someone the join guard would bounce.
+                    if (group.HasMember(userId) || !group.HasAccessToPlayQueue(user))
+                    {
+                        continue;
+                    }
+
+                    var info = group.AddOrRefreshInvite(session, userId);
+                    if (info is null)
+                    {
+                        continue;
+                    }
+
+                    _sessionManager.SendMessageToUserSessions(
+                        new List<Guid> { userId },
+                        SessionMessageType.SyncPlayGroupUpdate,
+                        new SyncPlayGroupInviteUpdate(group.GroupId, info),
+                        cancellationToken);
+
+                    _logger.LogInformation("Session {SessionId} invited user {UserId} to group {GroupId}.", session.Id, userId, group.GroupId.ToString());
+                }
+            }
+        }
+
+        /// <inheritdoc />
+        public void DeclineInvite(SessionInfo session, Guid groupId, CancellationToken cancellationToken)
+        {
+            if (session is null)
+            {
+                throw new InvalidOperationException("Session is null!");
+            }
+
+            // Locking required to access list of groups.
+            lock (_groupsLock)
+            {
+                if (!_groups.TryGetValue(groupId, out var group))
+                {
+                    // Group already gone; the client has already dismissed the invite.
+                    return;
+                }
+
+                // Group lock required as Group is not thread-safe.
+                lock (group)
+                {
+                    var inviterUserId = group.GetInviterUserId(session.UserId);
+                    if (!group.MarkInviteDeclined(session.UserId))
+                    {
+                        return;
+                    }
+
+                    _logger.LogInformation("User {UserId} declined the invite to group {GroupId}.", session.UserId, group.GroupId.ToString());
+
+                    if (inviterUserId.HasValue && group.HasMember(inviterUserId.Value))
+                    {
+                        _sessionManager.SendMessageToUserSessions(
+                            new List<Guid> { inviterUserId.Value },
+                            SessionMessageType.SyncPlayGroupUpdate,
+                            new SyncPlayGroupInviteDeclinedUpdate(group.GroupId, session.UserName),
+                            cancellationToken);
+                    }
+
+                    // Close the invite modal on all of the decliner's devices.
+                    NotifyInviteCancelled(new List<Guid> { session.UserId }, group.GroupId, GroupInviteCancelReason.DeclinedElsewhere, cancellationToken);
+                }
+            }
+        }
+
+        /// <inheritdoc />
+        public IReadOnlyList<SyncPlayInviteCandidateDto> GetInviteCandidates(SessionInfo session)
+        {
+            if (session is null)
+            {
+                throw new InvalidOperationException("Session is null!");
+            }
+
+            if (!_sessionToGroupMap.TryGetValue(session.Id, out var group))
+            {
+                // Only members of a group may see who is online.
+                return Array.Empty<SyncPlayInviteCandidateDto>();
+            }
+
+            // Snapshot sessions and resolve users outside the group lock,
+            // so playback requests are not queued behind repository calls.
+            var cutoff = DateTime.UtcNow.AddMinutes(-5);
+            var candidateUsers = _sessionManager.Sessions
+                .Where(s => !s.UserId.IsEmpty() && s.LastActivityDate >= cutoff)
+                .Select(s => s.UserId)
+                .Distinct()
+                .Where(id => !id.Equals(session.UserId))
+                .Select(id => _userManager.GetUserById(id))
+                .Where(user => user is not null && user.SyncPlayAccess != SyncPlayUserAccessType.None)
+                .ToList();
+
+            var candidates = new List<SyncPlayInviteCandidateDto>();
+
+            // Group lock required as Group is not thread-safe.
+            lock (group)
+            {
+                if (group.IsGroupEmpty())
+                {
+                    return Array.Empty<SyncPlayInviteCandidateDto>();
+                }
+
+                foreach (var user in candidateUsers)
+                {
+                    if (group.HasMember(user.Id) || !group.HasAccessToPlayQueue(user))
+                    {
+                        continue;
+                    }
+
+                    candidates.Add(new SyncPlayInviteCandidateDto(user.Id, user.Username, group.IsInvitePending(user.Id)));
+                }
+            }
+
+            return candidates
+                .OrderBy(candidate => candidate.UserName, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        /// <inheritdoc />
+        public IReadOnlyList<GroupInviteInfo> ListInvites(SessionInfo session)
+        {
+            if (session is null)
+            {
+                throw new InvalidOperationException("Session is null!");
+            }
+
+            var invites = new List<GroupInviteInfo>();
+
+            // Locking required to access list of groups.
+            lock (_groupsLock)
+            {
+                foreach (var (_, group) in _groups)
+                {
+                    // Locking required as group is not thread-safe.
+                    lock (group)
+                    {
+                        var info = group.GetPendingInviteInfo(session.UserId);
+                        if (info is not null)
+                        {
+                            invites.Add(info);
+                        }
+                    }
+                }
+            }
+
+            return invites;
+        }
+
+        /// <summary>
+        /// Notifies all sessions of the given users that an invite is no longer actionable. Gusfin extension.
+        /// </summary>
+        /// <param name="userIds">The user identifiers to notify.</param>
+        /// <param name="groupId">The group identifier.</param>
+        /// <param name="reason">The reason the invite was cancelled.</param>
+        /// <param name="cancellationToken">The cancellation token.</param>
+        private void NotifyInviteCancelled(IReadOnlyList<Guid> userIds, Guid groupId, GroupInviteCancelReason reason, CancellationToken cancellationToken)
+        {
+            _sessionManager.SendMessageToUserSessions(
+                userIds.ToList(),
+                SessionMessageType.SyncPlayGroupUpdate,
+                new SyncPlayGroupInviteCancelledUpdate(groupId, new GroupInviteCancelledInfo(groupId, reason)),
+                cancellationToken);
         }
 
         /// <summary>

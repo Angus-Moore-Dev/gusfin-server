@@ -58,7 +58,7 @@ public class SyncPlayController : BaseJellyfinApiController
         [FromBody, Required] NewGroupRequestDto requestData)
     {
         var currentSession = await RequestHelpers.GetSession(_sessionManager, _userManager, HttpContext).ConfigureAwait(false);
-        var syncPlayRequest = new NewGroupRequest(requestData.GroupName.Trim());
+        var syncPlayRequest = new NewGroupRequest(requestData.GroupName.Trim(), requestData.Visibility);
         return Ok(_syncPlayManager.NewGroup(currentSession, syncPlayRequest, CancellationToken.None));
     }
 
@@ -457,6 +457,68 @@ public class SyncPlayController : BaseJellyfinApiController
         var currentSession = await RequestHelpers.GetSession(_sessionManager, _userManager, HttpContext).ConfigureAwait(false);
         var syncPlayRequest = new PingGroupRequest(requestData.Ping);
         _syncPlayManager.HandleRequest(currentSession, syncPlayRequest, CancellationToken.None);
+        return NoContent();
+    }
+
+    /// <summary>
+    /// Gets the online users that can be invited to the caller's SyncPlay group. Gusfin extension.
+    /// </summary>
+    /// <response code="200">Invite candidates returned.</response>
+    /// <returns>An <see cref="IEnumerable{SyncPlayInviteCandidateDto}"/> containing the invite candidates.</returns>
+    [HttpGet("InviteCandidates")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [Authorize(Policy = Policies.SyncPlayIsInGroup)]
+    public async Task<ActionResult<IEnumerable<SyncPlayInviteCandidateDto>>> SyncPlayGetInviteCandidates()
+    {
+        var currentSession = await RequestHelpers.GetSession(_sessionManager, _userManager, HttpContext).ConfigureAwait(false);
+        return Ok(_syncPlayManager.GetInviteCandidates(currentSession).AsEnumerable());
+    }
+
+    /// <summary>
+    /// Invites users to the caller's SyncPlay group. Gusfin extension.
+    /// </summary>
+    /// <param name="requestData">The users to invite.</param>
+    /// <response code="204">Invites sent.</response>
+    /// <returns>A <see cref="NoContentResult"/> indicating success.</returns>
+    [HttpPost("Invite")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [Authorize(Policy = Policies.SyncPlayIsInGroup)]
+    public async Task<ActionResult> SyncPlayInvite(
+        [FromBody, Required] InviteToGroupRequestDto requestData)
+    {
+        var currentSession = await RequestHelpers.GetSession(_sessionManager, _userManager, HttpContext).ConfigureAwait(false);
+        _syncPlayManager.InviteToGroup(currentSession, requestData.UserIds, CancellationToken.None);
+        return NoContent();
+    }
+
+    /// <summary>
+    /// Gets the pending SyncPlay invites addressed to the calling user. Gusfin extension.
+    /// </summary>
+    /// <response code="200">Pending invites returned.</response>
+    /// <returns>An <see cref="IEnumerable{GroupInviteInfo}"/> containing the pending invites.</returns>
+    [HttpGet("Invites")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [Authorize(Policy = Policies.SyncPlayJoinGroup)]
+    public async Task<ActionResult<IEnumerable<GroupInviteInfo>>> SyncPlayGetInvites()
+    {
+        var currentSession = await RequestHelpers.GetSession(_sessionManager, _userManager, HttpContext).ConfigureAwait(false);
+        return Ok(_syncPlayManager.ListInvites(currentSession).AsEnumerable());
+    }
+
+    /// <summary>
+    /// Declines a pending SyncPlay invite. Gusfin extension.
+    /// </summary>
+    /// <param name="requestData">The group whose invite is being declined.</param>
+    /// <response code="204">Invite declined.</response>
+    /// <returns>A <see cref="NoContentResult"/> indicating success.</returns>
+    [HttpPost("Invite/Decline")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [Authorize(Policy = Policies.SyncPlayJoinGroup)]
+    public async Task<ActionResult> SyncPlayDeclineInvite(
+        [FromBody, Required] DeclineInviteRequestDto requestData)
+    {
+        var currentSession = await RequestHelpers.GetSession(_sessionManager, _userManager, HttpContext).ConfigureAwait(false);
+        _syncPlayManager.DeclineInvite(currentSession, requestData.GroupId, CancellationToken.None);
         return NoContent();
     }
 }
