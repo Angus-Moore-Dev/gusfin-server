@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using MediaBrowser.Model.SyncPlay;
 
 namespace Jellyfin.Api.Models.SyncPlayDtos;
 
@@ -13,6 +14,7 @@ public class NewGroupRequestDto
     public NewGroupRequestDto()
     {
         GroupName = string.Empty;
+        Visibility = SyncPlayGroupVisibility.Public;
     }
 
     /// <summary>
@@ -21,4 +23,10 @@ public class NewGroupRequestDto
     /// <value>The name of the new group.</value>
     [StringLength(200, ErrorMessage = "Group name must not exceed 200 characters.")]
     public string GroupName { get; set; }
+
+    /// <summary>
+    /// Gets or sets the group visibility. Gusfin extension. Defaults to public.
+    /// </summary>
+    /// <value>The visibility of the new group.</value>
+    public SyncPlayGroupVisibility Visibility { get; set; }
 }

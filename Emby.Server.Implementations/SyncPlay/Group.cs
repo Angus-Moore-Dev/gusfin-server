@@ -59,6 +59,11 @@ namespace Emby.Server.Implementations.SyncPlay
             new Dictionary<string, GroupMember>(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>
+        /// The invites to the group, keyed by invitee user identifier. Gusfin extension.
+        /// </summary>
+        private readonly Dictionary<Guid, GroupInvite> _invites = new Dictionary<Guid, GroupInvite>();
+
+        /// <summary>
         /// The internal group state.
         /// </summary>
         private IGroupState _state;
@@ -72,6 +77,14 @@ namespace Emby.Server.Implementations.SyncPlay
         /// The time of the last diagnostics broadcast. Gusfin extension.
         /// </summary>
         private DateTime _lastDiagnosticsBroadcast = DateTime.MinValue;
+
+        /// <summary>
+        /// Gets or sets the lifetime of a pending invite, in seconds. Gusfin extension.
+        /// </summary>
+        /// <remarks>
+        /// Settable internally so tests can exercise expiry.
+        /// </remarks>
+        internal int InviteLifetimeSeconds { get; set; } = 300;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="Group" /> class.
@@ -126,6 +139,18 @@ namespace Emby.Server.Implementations.SyncPlay
         public string GroupName { get; private set; }
 
         /// <summary>
+        /// Gets the group visibility. Gusfin extension.
+        /// </summary>
+        /// <value>The group visibility.</value>
+        public SyncPlayGroupVisibility Visibility { get; private set; }
+
+        /// <summary>
+        /// Gets the identifier of the user that created the group. Gusfin extension.
+        /// </summary>
+        /// <value>The creator's user identifier.</value>
+        public Guid CreatedByUserId { get; private set; }
+
+        /// <summary>
         /// Gets the group identifier.
         /// </summary>
         /// <value>The group identifier.</value>
@@ -162,6 +187,11 @@ namespace Emby.Server.Implementations.SyncPlay
                     Ping = DefaultPing,
                     IsBuffering = false
                 });
+
+            // Gusfin extension: record membership as an accepted invite so that past members
+            // can always see and rejoin a private group (reconnects, second devices, the
+            // creator leaving and coming back) for as long as the group lives.
+            MarkInviteAccepted(session.UserId);
         }
 
         /// <summary>
@@ -262,6 +292,8 @@ namespace Emby.Server.Implementations.SyncPlay
         public void CreateGroup(SessionInfo session, NewGroupRequest request, CancellationToken cancellationToken)
         {
             GroupName = request.GroupName;
+            Visibility = request.Visibility;
+            CreatedByUserId = session.UserId;
             AddSession(session);
 
             var sessionIsPlayingAnItem = session.FullNowPlayingItem is not null;
@@ -367,7 +399,10 @@ namespace Emby.Server.Implementations.SyncPlay
         public GroupInfoDto GetInfo()
         {
             var participants = _participants.Values.Select(session => session.UserName).Distinct().ToList();
-            return new GroupInfoDto(GroupId, GroupName, _state.Type, participants, DateTime.UtcNow);
+            return new GroupInfoDto(GroupId, GroupName, _state.Type, participants, DateTime.UtcNow)
+            {
+                Visibility = Visibility
+            };
         }
 
         /// <summary>
@@ -379,6 +414,173 @@ namespace Emby.Server.Implementations.SyncPlay
         {
             var items = PlayQueue.GetPlaylist().Select(item => item.ItemId).ToList();
             return HasAccessToQueue(user, items);
+        }
+
+        // Gusfin extension: private groups.
+
+        /// <summary>
+        /// Gets a value indicating whether the group is public. Gusfin extension.
+        /// </summary>
+        /// <value><c>true</c> if the group is public; <c>false</c> otherwise.</value>
+        public bool IsPublic => Visibility == SyncPlayGroupVisibility.Public;
+
+        /// <summary>
+        /// Checks whether any session of the given user is a participant of the group. Gusfin extension.
+        /// </summary>
+        /// <param name="userId">The user identifier.</param>
+        /// <returns><c>true</c> if the user is a member of the group; <c>false</c> otherwise.</returns>
+        public bool HasMember(Guid userId)
+            => _participants.Values.Any(member => member.UserId.Equals(userId));
+
+        /// <summary>
+        /// Checks whether the group should be visible to the given user in listings and lookups. Gusfin extension.
+        /// </summary>
+        /// <param name="userId">The user identifier.</param>
+        /// <returns><c>true</c> if the group is visible to the user; <c>false</c> otherwise.</returns>
+        public bool IsVisibleTo(Guid userId)
+            => IsPublic || HasMember(userId)
+               || (_invites.TryGetValue(userId, out var invite) && invite.GrantsJoin(DateTime.UtcNow));
+
+        /// <summary>
+        /// Checks whether the given user may join the group. Gusfin extension.
+        /// Identical to <see cref="IsVisibleTo"/> today, kept separate so the two can diverge.
+        /// </summary>
+        /// <param name="userId">The user identifier.</param>
+        /// <returns><c>true</c> if the user may join the group; <c>false</c> otherwise.</returns>
+        public bool CanJoin(Guid userId)
+            => IsVisibleTo(userId);
+
+        /// <summary>
+        /// Checks whether the given user holds an invite that no longer grants joining. Gusfin extension.
+        /// Distinguishes "invite lapsed" from "never invited" so the right error can be picked
+        /// without leaking the group's existence.
+        /// </summary>
+        /// <param name="userId">The user identifier.</param>
+        /// <returns><c>true</c> if the user holds a lapsed invite; <c>false</c> otherwise.</returns>
+        public bool HasLapsedInvite(Guid userId)
+            => _invites.TryGetValue(userId, out var invite) && !invite.GrantsJoin(DateTime.UtcNow);
+
+        /// <summary>
+        /// Checks whether the given user has a pending invite to the group. Gusfin extension.
+        /// </summary>
+        /// <param name="userId">The user identifier.</param>
+        /// <returns><c>true</c> if the user has a pending invite; <c>false</c> otherwise.</returns>
+        public bool IsInvitePending(Guid userId)
+            => _invites.TryGetValue(userId, out var invite) && invite.IsPending(DateTime.UtcNow);
+
+        /// <summary>
+        /// Adds an invite for the given user, or refreshes an existing one. Gusfin extension.
+        /// Refreshing clears a previous decline, preserves a previous accept, resets the expiry
+        /// and overwrites the inviter.
+        /// </summary>
+        /// <param name="from">The inviting session.</param>
+        /// <param name="userId">The identifier of the user to invite.</param>
+        /// <returns>The invite info to push to the invitee, or <c>null</c> if the user is already a member.</returns>
+        public GroupInviteInfo AddOrRefreshInvite(SessionInfo from, Guid userId)
+        {
+            if (HasMember(userId))
+            {
+                return null;
+            }
+
+            var now = DateTime.UtcNow;
+            var expiresAt = now.AddSeconds(InviteLifetimeSeconds);
+            if (_invites.TryGetValue(userId, out var invite))
+            {
+                invite.Refresh(from.UserId, from.UserName, now, expiresAt);
+            }
+            else
+            {
+                invite = new GroupInvite(from.UserId, from.UserName, now, expiresAt);
+                _invites[userId] = invite;
+            }
+
+            return GetInviteInfo(invite);
+        }
+
+        /// <summary>
+        /// Marks the given user's invite as accepted, creating the record if none exists. Gusfin extension.
+        /// An accepted invite never expires for the group's lifetime.
+        /// </summary>
+        /// <param name="userId">The user identifier.</param>
+        public void MarkInviteAccepted(Guid userId)
+        {
+            var now = DateTime.UtcNow;
+            if (_invites.TryGetValue(userId, out var invite))
+            {
+                invite.MarkAccepted(now);
+            }
+            else
+            {
+                invite = new GroupInvite(userId, string.Empty, now, now);
+                invite.MarkAccepted(now);
+                _invites[userId] = invite;
+            }
+        }
+
+        /// <summary>
+        /// Marks the given user's pending invite as declined. Gusfin extension.
+        /// </summary>
+        /// <param name="userId">The user identifier.</param>
+        /// <returns><c>true</c> if a pending invite was declined; <c>false</c> otherwise.</returns>
+        public bool MarkInviteDeclined(Guid userId)
+        {
+            var now = DateTime.UtcNow;
+            if (_invites.TryGetValue(userId, out var invite) && invite.IsPending(now))
+            {
+                invite.MarkDeclined(now);
+                return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Gets the identifier of the user that invited the given user. Gusfin extension.
+        /// </summary>
+        /// <param name="userId">The invitee's user identifier.</param>
+        /// <returns>The inviter's user identifier, or <c>null</c> if the user was never invited.</returns>
+        public Guid? GetInviterUserId(Guid userId)
+            => _invites.TryGetValue(userId, out var invite) ? invite.InvitedByUserId : null;
+
+        /// <summary>
+        /// Gets the identifiers of all users with a pending invite. Gusfin extension.
+        /// Used to notify invitees when the group is torn down.
+        /// </summary>
+        /// <returns>The identifiers of all users with a pending invite.</returns>
+        public IReadOnlyList<Guid> GetPendingInviteeIds()
+        {
+            var now = DateTime.UtcNow;
+            return _invites
+                .Where(pair => pair.Value.IsPending(now))
+                .Select(pair => pair.Key)
+                .ToList();
+        }
+
+        /// <summary>
+        /// Gets the invite info for the given user's pending invite. Gusfin extension.
+        /// </summary>
+        /// <param name="userId">The user identifier.</param>
+        /// <returns>The invite info, or <c>null</c> if the user has no pending invite.</returns>
+        public GroupInviteInfo GetPendingInviteInfo(Guid userId)
+        {
+            if (_invites.TryGetValue(userId, out var invite) && invite.IsPending(DateTime.UtcNow))
+            {
+                return GetInviteInfo(invite);
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Builds the wire payload for an invite. Gusfin extension.
+        /// </summary>
+        /// <param name="invite">The invite.</param>
+        /// <returns>The invite info.</returns>
+        private GroupInviteInfo GetInviteInfo(GroupInvite invite)
+        {
+            var participantCount = _participants.Values.Select(member => member.UserName).Distinct().Count();
+            return new GroupInviteInfo(GroupId, GroupName, invite.InvitedByUserId, invite.InvitedByUserName, invite.ExpiresAt, participantCount);
         }
 
         /// <inheritdoc />
@@ -755,6 +957,105 @@ namespace Emby.Server.Implementations.SyncPlay
                 isPlaying,
                 PlayQueue.ShuffleMode,
                 PlayQueue.RepeatMode);
+        }
+
+        /// <summary>
+        /// Class GroupInvite. Gusfin extension: the state of an invite to this group.
+        /// Access is serialized by the group lock, like the rest of the group's state.
+        /// </summary>
+        private sealed class GroupInvite
+        {
+            /// <summary>
+            /// Initializes a new instance of the <see cref="GroupInvite"/> class.
+            /// </summary>
+            /// <param name="invitedByUserId">The inviter's user identifier.</param>
+            /// <param name="invitedByUserName">The inviter's user name.</param>
+            /// <param name="createdAt">The UTC time the invite was created.</param>
+            /// <param name="expiresAt">The UTC time the invite expires.</param>
+            public GroupInvite(Guid invitedByUserId, string invitedByUserName, DateTime createdAt, DateTime expiresAt)
+            {
+                InvitedByUserId = invitedByUserId;
+                InvitedByUserName = invitedByUserName;
+                CreatedAt = createdAt;
+                ExpiresAt = expiresAt;
+            }
+
+            /// <summary>
+            /// Gets the inviter's user identifier.
+            /// </summary>
+            public Guid InvitedByUserId { get; private set; }
+
+            /// <summary>
+            /// Gets the inviter's user name.
+            /// </summary>
+            public string InvitedByUserName { get; private set; }
+
+            /// <summary>
+            /// Gets the UTC time the invite was created.
+            /// </summary>
+            public DateTime CreatedAt { get; private set; }
+
+            /// <summary>
+            /// Gets the UTC time the invite expires.
+            /// </summary>
+            public DateTime ExpiresAt { get; private set; }
+
+            /// <summary>
+            /// Gets the UTC time the invitee joined. An accepted invite never expires for the group's lifetime.
+            /// </summary>
+            public DateTime? AcceptedAt { get; private set; }
+
+            /// <summary>
+            /// Gets the UTC time the invitee declined. A declined invite needs a fresh invite to retry.
+            /// </summary>
+            public DateTime? DeclinedAt { get; private set; }
+
+            /// <summary>
+            /// Checks whether the invite is awaiting an answer.
+            /// </summary>
+            /// <param name="now">The current UTC time.</param>
+            /// <returns><c>true</c> if the invite is pending; <c>false</c> otherwise.</returns>
+            public bool IsPending(DateTime now)
+                => AcceptedAt is null && DeclinedAt is null && ExpiresAt > now;
+
+            /// <summary>
+            /// Checks whether the invite grants joining the group.
+            /// </summary>
+            /// <param name="now">The current UTC time.</param>
+            /// <returns><c>true</c> if the invite grants joining; <c>false</c> otherwise.</returns>
+            public bool GrantsJoin(DateTime now)
+                => AcceptedAt is not null || IsPending(now);
+
+            /// <summary>
+            /// Re-issues the invite: clears a previous decline, preserves a previous accept,
+            /// resets the expiry and overwrites the inviter.
+            /// </summary>
+            /// <param name="byUserId">The new inviter's user identifier.</param>
+            /// <param name="byUserName">The new inviter's user name.</param>
+            /// <param name="now">The current UTC time.</param>
+            /// <param name="expiresAt">The new UTC expiry time.</param>
+            public void Refresh(Guid byUserId, string byUserName, DateTime now, DateTime expiresAt)
+            {
+                InvitedByUserId = byUserId;
+                InvitedByUserName = byUserName;
+                CreatedAt = now;
+                ExpiresAt = expiresAt;
+                DeclinedAt = null;
+            }
+
+            /// <summary>
+            /// Marks the invite as accepted. Idempotent: the first accept time is kept.
+            /// </summary>
+            /// <param name="when">The current UTC time.</param>
+            public void MarkAccepted(DateTime when)
+                => AcceptedAt ??= when;
+
+            /// <summary>
+            /// Marks the invite as declined.
+            /// </summary>
+            /// <param name="when">The current UTC time.</param>
+            public void MarkDeclined(DateTime when)
+                => DeclinedAt = when;
         }
     }
 }

@@ -54,6 +54,26 @@ namespace MediaBrowser.Model.SyncPlay
         /// The group-diagnostics update. Gusfin extension: periodic per-member playback diagnostics,
         /// only sent to members that have reported diagnostics themselves.
         /// </summary>
-        GroupDiagnostics
+        GroupDiagnostics,
+
+        /// <summary>
+        /// The group-invite update. Gusfin extension: a group invite addressed to this user.
+        /// </summary>
+        GroupInvite,
+
+        /// <summary>
+        /// The group-invite-cancelled update. Gusfin extension: a previously delivered invite is no longer actionable.
+        /// </summary>
+        GroupInviteCancelled,
+
+        /// <summary>
+        /// The group-invite-required error. Gusfin extension: join rejected, the private group requires a valid invite.
+        /// </summary>
+        GroupInviteRequired,
+
+        /// <summary>
+        /// The group-invite-declined update. Gusfin extension: an invitee declined; sent to the inviter.
+        /// </summary>
+        GroupInviteDeclined
     }
 }

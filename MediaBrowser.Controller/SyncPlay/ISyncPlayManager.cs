@@ -69,5 +69,35 @@ namespace MediaBrowser.Controller.SyncPlay
         /// <param name="userId">The user identifier to check.</param>
         /// <returns><c>true</c> if the user is using SyncPlay; <c>false</c> otherwise.</returns>
         bool IsUserActive(Guid userId);
+
+        /// <summary>
+        /// Invites users to the caller's group. Gusfin extension.
+        /// </summary>
+        /// <param name="session">The inviting session. The target group is resolved from this session.</param>
+        /// <param name="userIds">The identifiers of the users to invite.</param>
+        /// <param name="cancellationToken">The cancellation token.</param>
+        void InviteToGroup(SessionInfo session, IReadOnlyList<Guid> userIds, CancellationToken cancellationToken);
+
+        /// <summary>
+        /// Declines a pending invite to a group. Gusfin extension.
+        /// </summary>
+        /// <param name="session">The declining session.</param>
+        /// <param name="groupId">The group identifier.</param>
+        /// <param name="cancellationToken">The cancellation token.</param>
+        void DeclineInvite(SessionInfo session, Guid groupId, CancellationToken cancellationToken);
+
+        /// <summary>
+        /// Gets the online users that the caller may invite to their group. Gusfin extension.
+        /// </summary>
+        /// <param name="session">The session. The target group is resolved from this session.</param>
+        /// <returns>The invite candidates, or an empty list if the session is in no group.</returns>
+        IReadOnlyList<SyncPlayInviteCandidateDto> GetInviteCandidates(SessionInfo session);
+
+        /// <summary>
+        /// Gets the pending invites addressed to the session's user. Gusfin extension.
+        /// </summary>
+        /// <param name="session">The session.</param>
+        /// <returns>The pending invites.</returns>
+        IReadOnlyList<GroupInviteInfo> ListInvites(SessionInfo session);
     }
 }

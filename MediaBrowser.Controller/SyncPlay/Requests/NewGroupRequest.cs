@@ -11,9 +11,11 @@ namespace MediaBrowser.Controller.SyncPlay.Requests
         /// Initializes a new instance of the <see cref="NewGroupRequest"/> class.
         /// </summary>
         /// <param name="groupName">The name of the new group.</param>
-        public NewGroupRequest(string groupName)
+        /// <param name="visibility">The visibility of the new group. Gusfin extension.</param>
+        public NewGroupRequest(string groupName, SyncPlayGroupVisibility visibility = SyncPlayGroupVisibility.Public)
         {
             GroupName = groupName;
+            Visibility = visibility;
         }
 
         /// <summary>
@@ -21,6 +23,12 @@ namespace MediaBrowser.Controller.SyncPlay.Requests
         /// </summary>
         /// <value>The name of the new group.</value>
         public string GroupName { get; }
+
+        /// <summary>
+        /// Gets the group visibility. Gusfin extension.
+        /// </summary>
+        /// <value>The visibility of the new group.</value>
+        public SyncPlayGroupVisibility Visibility { get; }
 
         /// <inheritdoc />
         public RequestType Type { get; } = RequestType.NewGroup;

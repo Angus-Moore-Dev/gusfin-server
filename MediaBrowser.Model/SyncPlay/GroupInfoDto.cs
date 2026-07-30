@@ -54,5 +54,11 @@ namespace MediaBrowser.Model.SyncPlay
         /// </summary>
         /// <value>The date when this DTO has been created.</value>
         public DateTime LastUpdatedAt { get; }
+
+        /// <summary>
+        /// Gets the group visibility. Gusfin extension.
+        /// </summary>
+        /// <value>The group visibility.</value>
+        public SyncPlayGroupVisibility Visibility { get; init; }
     }
 }
