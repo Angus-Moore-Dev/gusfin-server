@@ -178,6 +178,32 @@ public class GroupTests
     }
 
     [Fact]
+    public void GetInfo_WithPlayingItem_ReportsNowPlaying()
+    {
+        MockItem.SetupGet(i => i.Name).Returns("test-item");
+        MockItem.Object.RunTimeTicks = 1000;
+        MockLibraryManager.Setup(m => m.GetItemById(It.IsAny<Guid>())).Returns(MockItem.Object);
+
+        var group = new Emby.Server.Implementations.SyncPlay.Group(MockLoggerFactory.Object, MockUserManager.Object, MockSessionManager.Object, MockLibraryManager.Object);
+        var itemId = Guid.NewGuid();
+
+        group.CreateGroup(CreateSession(Guid.NewGuid()), new NewGroupRequest("test-group"), CancellationToken.None);
+
+        Assert.Null(group.GetInfo().NowPlaying);
+
+        Assert.True(group.SetPlayQueue(new List<Guid> { itemId }, 0, 500));
+
+        var nowPlaying = group.GetInfo().NowPlaying;
+        Assert.NotNull(nowPlaying);
+        Assert.Equal(itemId, nowPlaying!.ItemId);
+        Assert.Equal("test-item", nowPlaying.Name);
+        Assert.Null(nowPlaying.SeriesName);
+        Assert.Equal(500, nowPlaying.PositionTicks);
+        Assert.Equal(1000, nowPlaying.RunTimeTicks);
+        Assert.False(nowPlaying.IsPlaying);
+    }
+
+    [Fact]
     public void AddOrRefreshInvite_ForExistingMember_ReturnsNull()
     {
         var group = new Emby.Server.Implementations.SyncPlay.Group(MockLoggerFactory.Object, MockUserManager.Object, MockSessionManager.Object, MockLibraryManager.Object);

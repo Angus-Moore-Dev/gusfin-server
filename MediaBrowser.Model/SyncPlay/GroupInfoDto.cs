@@ -60,5 +60,11 @@ namespace MediaBrowser.Model.SyncPlay
         /// </summary>
         /// <value>The group visibility.</value>
         public SyncPlayGroupVisibility Visibility { get; init; }
+
+        /// <summary>
+        /// Gets what the group is currently watching, or <c>null</c> when idle. Gusfin extension.
+        /// </summary>
+        /// <value>The now-playing info.</value>
+        public GroupNowPlayingInfo? NowPlaying { get; init; }
     }
 }

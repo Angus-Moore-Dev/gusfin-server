@@ -7,6 +7,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Database.Implementations.Entities;
 using Jellyfin.Extensions;
+using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Session;
 using MediaBrowser.Controller.SyncPlay;
@@ -401,8 +402,49 @@ namespace Emby.Server.Implementations.SyncPlay
             var participants = _participants.Values.Select(session => session.UserName).Distinct().ToList();
             return new GroupInfoDto(GroupId, GroupName, _state.Type, participants, DateTime.UtcNow)
             {
-                Visibility = Visibility
+                Visibility = Visibility,
+                NowPlaying = GetNowPlayingInfo()
             };
+        }
+
+        /// <summary>
+        /// Builds the now-playing info for the group, or <c>null</c> when nothing is playing. Gusfin extension.
+        /// </summary>
+        /// <returns>The now-playing info.</returns>
+        private GroupNowPlayingInfo GetNowPlayingInfo()
+        {
+            var itemId = PlayQueue.GetPlayingItemId();
+            if (itemId.IsEmpty())
+            {
+                return null;
+            }
+
+            var item = _libraryManager.GetItemById(itemId);
+            if (item is null)
+            {
+                return null;
+            }
+
+            var isPlaying = _state.Type.Equals(GroupStateType.Playing);
+            var positionTicks = PositionTicks;
+            if (isPlaying)
+            {
+                // Elapsed time is negative while playback start is delayed to account
+                // for latency, in which case LastActivity is in the future.
+                var elapsedTime = DateTime.UtcNow - LastActivity;
+                positionTicks += Math.Max(elapsedTime.Ticks, 0);
+            }
+
+            var episode = item as Episode;
+            return new GroupNowPlayingInfo(
+                itemId,
+                item.Name,
+                episode?.SeriesName,
+                episode?.ParentIndexNumber,
+                episode?.IndexNumber,
+                SanitizePositionTicks(positionTicks),
+                RunTimeTicks,
+                isPlaying);
         }
 
         /// <summary>
